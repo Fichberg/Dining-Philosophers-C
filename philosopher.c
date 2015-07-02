@@ -13,17 +13,18 @@
 typedef struct philosopher {
 	int number;
 	int consumed;
+	sem_t can_eat;
 	struct philosopher *all_philosophers;
 } Philosopher;
 
 typedef struct fork {
 	int available;
-	sem_t semph;
+	sem_t available_fork;
 } Fork;
 
 Fork *forks;
-sem_t waiter, next_client, forks_available;
-int food, next, count, remaining, finish;
+int food, turn = 0, count = 0, even_philos, odd_philos;
+sem_t count_sem;
 pthread_mutex_t lock; /*food*/
 
 
@@ -43,7 +44,9 @@ int main(int argc, char **argv)
 
 	initiate_philosophers(args);
 	initiate_forks();
-	food = FOOD, count = 0, finish = 0, next = -1; remaining = PHILOSOPHERS;
+	food = FOOD, count = 0;
+
+
 
 	if(pthread_mutex_init(&lock, NULL) != 0)
 	{
@@ -51,24 +54,11 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	if(sem_init(&waiter, 0, 1))
+	if(sem_init(&count_sem, 0, 1))
 	{
 		printf("Error creating semaphore.\n");
 		return -1;
 	}
-
-	if(sem_init(&forks_available, 0, 1))
-	{
-		printf("Error creating semaphore.\n");
-		return -1;
-	}
-
-	if(sem_init(&next_client, 0, 0))
-	{
-		printf("Error creating semaphore.\n");
-		return -1;
-	}
-
 
 	for(i = 0; i <= PHILOSOPHERS; i++)
 	{
@@ -93,9 +83,9 @@ int main(int argc, char **argv)
 
 	free(args); args = NULL;
 	free(philosopher_threads); philosopher_threads = NULL;
-	for(i = 0; i < FORKS; i++) sem_destroy(&forks[i].semph);
+	for(i = 0; i < FORKS; i++) sem_destroy(&forks[i].available_fork);
 	free(forks); forks = NULL;
-	sem_destroy(&waiter); sem_destroy(&next_client); sem_destroy(&forks_available);
+	sem_destroy(&count_sem);
 	pthread_mutex_destroy(&lock);
 	return 0;
 }
@@ -103,73 +93,51 @@ int main(int argc, char **argv)
 
 void *dinner(void *args)
 {
-	int right_fork, left_fork;
 	Philosopher *philosopher = ((Philosopher*) args);
 
 
 	if(philosopher->number == COORDINATOR)
 	{
+		int i;
+
+		odd_philos = PHILOSOPHERS / 2;
+		if(PHILOSOPHERS % 2 == 0) even_philos = odd_philos;
+		else even_philos = odd_philos + 1;
+
 		while(1)
 		{
-			sem_wait(&next_client);
-			left_fork  =  next;
-			right_fork = (next + 1) % PHILOSOPHERS;		
-
-			while(remaining >= PHILOSOPHERS) continue;
-			sem_wait(&forks_available);
-			remaining++;
-			sem_post(&forks_available);
-			forks[left_fork].available = AVAILABLE;
-			sem_post(&forks[left_fork].semph);
-			printf("PHILOSOPHERS #%d released fork %d (left)\n", next, left_fork);
+			printf("TURN %d:\n\n", turn);
+			/*Release all odds OR all even philosophers to eat*/
+			for(i = turn; i < PHILOSOPHERS; i+=2) sem_post(&((philosopher->all_philosophers[i]).can_eat));
 			
-
-			while(remaining >= PHILOSOPHERS) continue;
-			sem_wait(&forks_available);
-			remaining++;
-			sem_post(&forks_available);
-			forks[right_fork].available = AVAILABLE;
-			sem_post(&forks[right_fork].semph);
-			printf("PHILOSOPHERS #%d released fork %d (right)\n", next, right_fork);
-			sem_post(&waiter);
+			/*Wait them finish to eat*/
+			if(turn % 2 == 0) while (count != even_philos) continue;
+			else while (count != odd_philos) continue;
+			
+			/*Collect all forks*/
+			for(i = turn; i < PHILOSOPHERS; i+=2) sem_wait(&forks[i].available_fork);
+			turn = (turn + 1) % 2;
+			count = 0;
 		}
 	}
 	else
 	{
+		int right_fork, left_fork;
 		left_fork  =  philosopher->number;
 		right_fork = (philosopher->number + 1) % PHILOSOPHERS;
 		while(1)
 		{
-			printf("Philosopher %d is THINKING\n", philosopher->number);
-
-			sem_wait(&waiter);
-			next = philosopher->number;
-			sem_post(&next_client);
-			
-			while(remaining <= 1) continue;
-			sem_wait(&forks_available);
-			remaining--;
-			sem_post(&forks_available);
-			while(!forks[left_fork].available) sem_wait(&forks[left_fork].semph);
-			forks[left_fork].available = !AVAILABLE;
-			printf("PHILOSOPHERS #%d got fork %d (left)\n", philosopher->number, left_fork);
-			
-			while(remaining == 0) continue;
-			sem_wait(&forks_available);
-			remaining--;
-			sem_post(&forks_available);
-			while(!forks[right_fork].available) sem_wait(&forks[right_fork].semph);
-			forks[right_fork].available = !AVAILABLE;
-			printf("PHILOSOPHERS #%d got fork %d (right)\n", philosopher->number, right_fork);
-
-			printf("Philosopher %d is EATING\n", philosopher->number);
+			sem_wait(&(philosopher->can_eat));
+			printf("Philosopher #%d is eating\n", philosopher->number);
+			sleep(1);
+			sem_post(&forks[left_fork].available_fork); sem_post(&forks[right_fork].available_fork);
+			sem_wait(&count_sem);
+				count++;
+			sem_post(&count_sem);
+			/*do_think()*/
+			sleep(1);
 		}
 	}
-
-	pthread_mutex_lock(&lock);
-		count++;
-		if(count == PHILOSOPHERS) finish = 1;
-	pthread_mutex_unlock(&lock);
 
 	return NULL;
 }
@@ -181,12 +149,11 @@ void initiate_forks()
 	for(i = 0; i < PHILOSOPHERS; i++)
 	{
 		forks[i].available = AVAILABLE;
-		if(sem_init(&forks[i].semph, 0, 1))
+		if(sem_init(&forks[i].available_fork, 0, 1))
 		{
 			printf("Error creating semaphore.\n");
 			exit(-1);
 		}
-		sem_wait(&forks[i].semph);
 	}	
 }
 
@@ -199,6 +166,11 @@ void initiate_philosophers(Philosopher *args)
 		args[i].number = i;
 		args[i].consumed = 0;
 		args[i].all_philosophers = args;
+		if(sem_init(&args[i].can_eat, 0, 0))
+		{
+			printf("Error creating semaphore.\n");
+			exit(-1);
+		}
 	}
 
 	args[COORDINATOR].number = COORDINATOR;
